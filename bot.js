@@ -5,7 +5,6 @@ const {
 const { Pool } = require('pg');
 const fs = require('fs');
 
-// ========== CONFIG ==========
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
@@ -19,51 +18,23 @@ for (const [nom, val] of Object.entries(REQUIS)) {
 }
 if (!process.env.DATABASE_URL) { console.error('❌ DATABASE_URL manquante.'); process.exit(1); }
 
-// ========== POSTGRES ==========
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// ========== UTILS ==========
-function genererCode() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
-}
+function genererCode() { return Math.random().toString(36).substring(2, 8).toUpperCase(); }
 
-// ========== CLIENT DISCORD ==========
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.DirectMessages,
-  ],
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages] });
 
-// ========== COMMANDE /panel ==========
-const commands = [
-  new SlashCommandBuilder()
-    .setName('panel')
-    .setDescription('Déploie le panel de vérification dans ce salon')
-    .setDefaultMemberPermissions(0)
-    .toJSON(),
-];
-
+const commands = [new SlashCommandBuilder().setName('panel').setDescription('Déploie le panel de vérification').setDefaultMemberPermissions(0).toJSON()];
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   try {
-    await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log('✅ Commande /panel enregistrée.');
-  } catch (err) {
-    console.error('❌ Erreur enregistrement commande :', err);
-  }
+  } catch (err) { console.error('❌ Erreur commande :', err); }
 });
 
-// ========== INTERACTIONS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
   // --- /panel ---
   if (interaction.isChatInputCommand() && interaction.commandName === 'panel') {
@@ -80,21 +51,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         '2️⃣ Le bot t\'enverra un **code en message privé (MP)**\n' +
         '3️⃣ Rends-toi sur le site et entre ce code : ' + SITE_URL + '\n' +
         '4️⃣ Prends une photo de ton **carnet de correspondance**\n' +
-        '5️⃣ Tu recevras automatiquement le rôle **Vérifié**\n\n' +
-        '⚠️ **Si tu ne reçois pas le MP** : vérifie que tes messages privés sont ouverts.\n' +
-        '(Paramètres Discord → Confidentialité et sécurité → Autoriser les messages privés du serveur)'
+        '5️⃣ Un modérateur vérifie et tu reçois le rôle **Vérifié**\n\n' +
+        '🛡️ **Aucune photo n\'est conservée.** Tu peux masquer ton visage si tu veux.\n\n' +
+        '⚠️ **Si tu ne reçois pas le MP** : vérifie que tes messages privés sont ouverts.'
       )
-      .setColor(0x5865F2)
-      .setFooter({ text: 'Une fois vérifié, tu verras tous les autres salons.' });
+      .setColor(0x5865F2);
 
-    const bouton = new ButtonBuilder()
-      .setCustomId('verifier')
-      .setLabel('Vérifier')
-      .setStyle(ButtonStyle.Primary)
-      .setEmoji('✅');
-
-    const row = new ActionRowBuilder().addComponents(bouton);
-    await interaction.reply({ embeds: [embed], components: [row] });
+    const bouton = new ButtonBuilder().setCustomId('verifier').setLabel('Vérifier').setStyle(ButtonStyle.Primary).setEmoji('✅');
+    await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(bouton)] });
     return;
   }
 
@@ -104,26 +68,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     let code;
 
     try {
-      const { rows } = await pool.query(
-        'SELECT code FROM verifications WHERE discord_id = $1 AND valide = 0',
-        [userId]
-      );
-
+      const { rows } = await pool.query('SELECT code FROM verifications WHERE discord_id = $1 AND valide = 0', [userId]);
       if (rows[0]) {
         code = rows[0].code;
       } else {
         code = genererCode();
-        await pool.query(
-          'INSERT INTO verifications (code, discord_id, valide, a_moderer) VALUES ($1, $2, 0, 0)',
-          [code, userId]
-        );
+        await pool.query('INSERT INTO verifications (code, discord_id, valide, a_moderer) VALUES ($1, $2, 0, 0)', [code, userId]);
       }
     } catch (err) {
-      console.error('Erreur SQL insert code :', err);
-      return interaction.reply({
-        content: '❌ Erreur interne. Réessaie dans quelques instants.',
-        ephemeral: true,
-      });
+      console.error('Erreur SQL:', err);
+      return interaction.reply({ content: '❌ Erreur interne.', ephemeral: true });
     }
 
     try {
@@ -131,76 +85,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `🔑 **Ton code de vérification :** \`${code}\`\n\n` +
         `👉 Rends-toi sur ${SITE_URL}\n` +
         `Entre ce code, puis prends en photo ton carnet de correspondance.\n\n` +
-        `Si tu as déjà reçu un code avant, ignore-le : celui-ci est le bon.`
+        `🛡️ Ta photo ne sera pas conservée.`
       );
-
-      await interaction.reply({
-        content: '✅ Je t\'ai envoyé ton code en message privé ! Vérifie tes MP.',
-        ephemeral: true,
-      });
+      await interaction.reply({ content: '✅ Je t\'ai envoyé ton code en MP !', ephemeral: true });
     } catch (err) {
-      console.error('Impossible d\'envoyer le MP :', err);
-      await interaction.reply({
-        content:
-          '❌ Je n\'ai pas pu t\'envoyer de message privé.\n\n' +
-          'Va dans **Paramètres Discord → Confidentialité et sécurité** ' +
-          'et active **Autoriser les messages privés du serveur**, puis réessaie.',
-        ephemeral: true,
-      });
+      await interaction.reply({ content: '❌ Je n\'ai pas pu t\'envoyer de MP. Active les messages privés du serveur.', ephemeral: true });
     }
     return;
   }
 
-  // --- Boutons modération (Approuver / Refuser) ---
+  // --- Boutons modération ---
   if (interaction.isButton() && interaction.customId.startsWith('mod_')) {
     const [action, code] = interaction.customId.split(':');
 
     try {
-      const { rows } = await pool.query(
-        'SELECT * FROM verifications WHERE code = $1',
-        [code]
-      );
-
-      if (!rows[0]) {
-        return interaction.reply({ content: 'Ce code n\'existe plus.', ephemeral: true });
-      }
+      const { rows } = await pool.query('SELECT * FROM verifications WHERE code = $1', [code]);
+      if (!rows[0]) return interaction.reply({ content: 'Ce code n\'existe plus.', ephemeral: true });
 
       if (action === 'mod_approuver') {
-        await pool.query(
-          'UPDATE verifications SET valide = 1, lycee = $1, a_moderer = 0 WHERE code = $2',
-          ['Validé manuellement', code]
-        );
-        await interaction.reply({
-          content: `✅ Code \`${code}\` approuvé. Le rôle sera donné dans quelques secondes.`,
-          ephemeral: true,
-        });
+        await pool.query('UPDATE verifications SET valide = 1, a_moderer = 0 WHERE code = $1', [code]);
+        await interaction.reply({ content: `✅ Code \`${code}\` approuvé.`, ephemeral: true });
       } else {
+        // Refus : on supprime la photo du disque
+        if (rows[0].photo_path && fs.existsSync(rows[0].photo_path)) {
+          try { fs.unlinkSync(rows[0].photo_path); } catch (e) {}
+        }
         await pool.query('DELETE FROM verifications WHERE code = $1', [code]);
         await interaction.reply({ content: `❌ Code \`${code}\` refusé.`, ephemeral: true });
       }
-
       await interaction.message.edit({ components: [] }).catch(() => {});
-    } catch (err) {
-      console.error('Erreur modération :', err);
-    }
+    } catch (err) { console.error('Erreur modération :', err); }
     return;
   }
 });
 
 // ========== POLLING ==========
 setInterval(async () => {
-  // 1) Donner le rôle aux validés + notifier dans #moderation
+  // 1) Donner le rôle aux validés + notifier dans #moderation + supprimer la photo
   try {
-    const { rows: valides } = await pool.query(
-      'SELECT * FROM verifications WHERE valide = 1'
-    );
-
+    const { rows: valides } = await pool.query('SELECT * FROM verifications WHERE valide = 1');
     for (const ligne of valides) {
       try {
         const guild = await client.guilds.fetch(GUILD_ID);
         const membre = await guild.members.fetch(ligne.discord_id).catch(() => null);
-
         if (!membre) {
+          if (ligne.photo_path && fs.existsSync(ligne.photo_path)) {
+            try { fs.unlinkSync(ligne.photo_path); } catch (e) {}
+          }
           await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
           continue;
         }
@@ -213,41 +144,36 @@ setInterval(async () => {
             await membre.send('🎉 Tu es maintenant vérifié ! Tu peux voir tous les salons du serveur.');
           } catch (e) {}
 
+          // Message dans #moderation
           try {
             const salonModo = await client.channels.fetch(SALON_MODERATION_ID);
             const embedModo = new EmbedBuilder()
-              .setTitle('✅ Nouvelle vérification validée')
+              .setTitle('✅ Vérification validée')
               .setColor(0x57F287)
               .addFields(
                 { name: 'Utilisateur', value: `<@${membre.id}> (\`${membre.user.tag}\`)`, inline: false },
                 { name: 'ID Discord', value: `\`${membre.id}\``, inline: true },
-                { name: 'Lycée', value: ligne.lycee || 'Non précisé', inline: true },
                 { name: 'Code', value: `\`${ligne.code}\``, inline: true }
               )
               .setThumbnail(membre.user.displayAvatarURL())
               .setTimestamp();
-
             await salonModo.send({ embeds: [embedModo] });
-          } catch (e) {
-            console.error('Erreur envoi notification modération :', e.message);
-          }
+          } catch (e) { console.error('Erreur notif modération :', e.message); }
+        }
+
+        // Supprimer la photo après validation
+        if (ligne.photo_path && fs.existsSync(ligne.photo_path)) {
+          try { fs.unlinkSync(ligne.photo_path); } catch (e) {}
         }
 
         await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
-      } catch (err) {
-        console.log(`Erreur rôle pour ${ligne.discord_id} : ${err.message}`);
-      }
+      } catch (err) { console.log(`Erreur rôle ${ligne.discord_id} : ${err.message}`); }
     }
-  } catch (err) {
-    console.error('Erreur polling rôles :', err.message);
-  }
+  } catch (err) { console.error('Erreur polling rôles :', err.message); }
 
-  // 2) Envoyer en modération les photos non reconnues
+  // 2) Envoyer en modération les photos à examiner
   try {
-    const { rows: aModerer } = await pool.query(
-      'SELECT * FROM verifications WHERE a_moderer = 1'
-    );
-
+    const { rows: aModerer } = await pool.query('SELECT * FROM verifications WHERE a_moderer = 1');
     for (const ligne of aModerer) {
       try {
         if (!ligne.photo_path || !fs.existsSync(ligne.photo_path)) {
@@ -261,40 +187,28 @@ setInterval(async () => {
 
         const embed = new EmbedBuilder()
           .setTitle('🔍 Vérification à examiner')
-          .setDescription(
-            `**Utilisateur :** ${membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``}\n` +
-            `**Code :** \`${ligne.code}\`\n` +
-            `**Statut :** ${ligne.lycee || 'En attente'}\n\n` +
-            `Mindee n'a pas pu valider automatiquement ce carnet. ` +
-            `Vérifie manuellement la photo ci-dessous.`
-          )
           .setColor(0xFEE75C)
+          .addFields(
+            { name: 'Utilisateur', value: membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``, inline: false },
+            { name: 'ID Discord', value: `\`${ligne.discord_id}\``, inline: true },
+            { name: 'Code', value: `\`${ligne.code}\``, inline: true }
+          )
           .setImage('attachment://carnet.jpg')
+          .setFooter({ text: 'Vérifie que le carnet correspond à un des 3 lycées' })
           .setTimestamp();
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`mod_approuver:${ligne.code}`)
-            .setLabel('Approuver')
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`mod_refuser:${ligne.code}`)
-            .setLabel('Refuser')
-            .setStyle(ButtonStyle.Danger)
+          new ButtonBuilder().setCustomId(`mod_approuver:${ligne.code}`).setLabel('Approuver').setStyle(ButtonStyle.Success).setEmoji('✅'),
+          new ButtonBuilder().setCustomId(`mod_refuser:${ligne.code}`).setLabel('Refuser').setStyle(ButtonStyle.Danger).setEmoji('❌')
         );
 
         const salon = await client.channels.fetch(SALON_MODERATION_ID);
         await salon.send({ embeds: [embed], components: [row], files: [fichier] });
 
         await pool.query('UPDATE verifications SET a_moderer = 2 WHERE code = $1', [ligne.code]);
-      } catch (err) {
-        console.log(`Erreur modération pour ${ligne.code} : ${err.message}`);
-      }
+      } catch (err) { console.log(`Erreur modération ${ligne.code} : ${err.message}`); }
     }
-  } catch (err) {
-    console.error('Erreur polling modération :', err.message);
-  }
+  } catch (err) { console.error('Erreur polling modération :', err.message); }
 }, 10000);
 
-// ========== LOGIN ==========
 client.login(TOKEN);
