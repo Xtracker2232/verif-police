@@ -5,6 +5,7 @@ const {
 const { Pool } = require('pg');
 const fs = require('fs');
 
+// ========== CONFIG ==========
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
@@ -18,23 +19,40 @@ for (const [nom, val] of Object.entries(REQUIS)) {
 }
 if (!process.env.DATABASE_URL) { console.error('❌ DATABASE_URL manquante.'); process.exit(1); }
 
+// ========== POSTGRES ==========
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
+// ========== UTILS ==========
 function genererCode() { return Math.random().toString(36).substring(2, 8).toUpperCase(); }
 
+// ========== CLIENT ==========
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages] });
 
-const commands = [new SlashCommandBuilder().setName('panel').setDescription('Déploie le panel de vérification').setDefaultMemberPermissions(0).toJSON()];
+// ========== COMMANDES ==========
+const commands = [
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Déploie le panel de vérification dans ce salon')
+    .setDefaultMemberPermissions(0)
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName('reception')
+    .setDescription('Affiche les vérifications en attente')
+    .setDefaultMemberPermissions(0)
+    .toJSON(),
+];
+
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   try {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log('✅ Commande /panel enregistrée.');
+    console.log('✅ Commandes /panel et /reception enregistrées.');
   } catch (err) { console.error('❌ Erreur commande :', err); }
 });
 
+// ========== INTERACTIONS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
   // --- /panel ---
   if (interaction.isChatInputCommand() && interaction.commandName === 'panel') {
@@ -59,6 +77,74 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const bouton = new ButtonBuilder().setCustomId('verifier').setLabel('Vérifier').setStyle(ButtonStyle.Primary).setEmoji('✅');
     await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(bouton)] });
+    return;
+  }
+
+  // --- /reception ---
+  if (interaction.isChatInputCommand() && interaction.commandName === 'reception') {
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      const { rows } = await pool.query(
+        "SELECT * FROM verifications WHERE a_moderer = 1 ORDER BY created_at ASC"
+      );
+
+      if (rows.length === 0) {
+        return interaction.editReply({ content: '📭 Aucune vérification en attente.' });
+      }
+
+      await interaction.editReply({ content: `📬 Envoi de ${rows.length} vérification(s) en cours…` });
+
+      let envoyees = 0;
+      let erreurs = 0;
+
+      for (const ligne of rows) {
+        try {
+          if (!ligne.photo_path || !fs.existsSync(ligne.photo_path)) {
+            console.log(`⚠️ Photo introuvable pour ${ligne.code} : ${ligne.photo_path}`);
+            erreurs++;
+            continue;
+          }
+
+          const membre = await client.users.fetch(ligne.discord_id).catch(() => null);
+          const fichier = new AttachmentBuilder(ligne.photo_path, { name: 'carnet.jpg' });
+
+          const embed = new EmbedBuilder()
+            .setTitle('🔍 Vérification à examiner')
+            .setColor(0xFEE75C)
+            .addFields(
+              { name: 'Utilisateur', value: membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``, inline: false },
+              { name: 'ID Discord', value: `\`${ligne.discord_id}\``, inline: true },
+              { name: 'Code', value: `\`${ligne.code}\``, inline: true }
+            )
+            .setImage('attachment://carnet.jpg')
+            .setFooter({ text: 'Vérifie que le carnet correspond à un des 3 lycées' })
+            .setTimestamp();
+
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`mod_approuver:${ligne.code}`).setLabel('Approuver').setStyle(ButtonStyle.Success).setEmoji('✅'),
+            new ButtonBuilder().setCustomId(`mod_refuser:${ligne.code}`).setLabel('Refuser').setStyle(ButtonStyle.Danger).setEmoji('❌')
+          );
+
+          const salon = await client.channels.fetch(SALON_MODERATION_ID);
+          await salon.send({ embeds: [embed], components: [row], files: [fichier] });
+
+          await pool.query('UPDATE verifications SET a_moderer = 2 WHERE code = $1', [ligne.code]);
+          envoyees++;
+          console.log(`📤 Envoyée : ${ligne.code}`);
+        } catch (err) {
+          console.error(`❌ Erreur envoi ${ligne.code} :`, err.message);
+          erreurs++;
+        }
+      }
+
+      await interaction.editReply({
+        content: `✅ ${envoyees} vérification(s) envoyée(s). ${erreurs > 0 ? `⚠️ ${erreurs} erreur(s).` : ''}`,
+      });
+    } catch (err) {
+      console.error('❌ Erreur /reception :', err);
+      await interaction.editReply({ content: '❌ Erreur lors de la récupération.' });
+    }
     return;
   }
 
@@ -104,14 +190,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (action === 'mod_approuver') {
         await pool.query('UPDATE verifications SET valide = 1, a_moderer = 0 WHERE code = $1', [code]);
-        await interaction.reply({ content: `✅ Code \`${code}\` approuvé.`, ephemeral: true });
+        await interaction.reply({ content: `✅ Code \`${code}\` approuvé. Le rôle sera donné dans quelques secondes.`, ephemeral: true });
       } else {
-        // Refus : on supprime la photo du disque
         if (rows[0].photo_path && fs.existsSync(rows[0].photo_path)) {
           try { fs.unlinkSync(rows[0].photo_path); } catch (e) {}
         }
         await pool.query('DELETE FROM verifications WHERE code = $1', [code]);
-        await interaction.reply({ content: `❌ Code \`${code}\` refusé.`, ephemeral: true });
+        await interaction.reply({ content: `❌ Code \`${code}\` refusé et photo supprimée.`, ephemeral: true });
       }
       await interaction.message.edit({ components: [] }).catch(() => {});
     } catch (err) { console.error('Erreur modération :', err); }
@@ -119,9 +204,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ========== POLLING ==========
+// ========== POLLING (rôles uniquement) ==========
 setInterval(async () => {
-  // 1) Donner le rôle aux validés + notifier dans #moderation + supprimer la photo
   try {
     const { rows: valides } = await pool.query('SELECT * FROM verifications WHERE valide = 1');
     for (const ligne of valides) {
@@ -144,7 +228,6 @@ setInterval(async () => {
             await membre.send('🎉 Tu es maintenant vérifié ! Tu peux voir tous les salons du serveur.');
           } catch (e) {}
 
-          // Message dans #moderation
           try {
             const salonModo = await client.channels.fetch(SALON_MODERATION_ID);
             const embedModo = new EmbedBuilder()
@@ -161,7 +244,6 @@ setInterval(async () => {
           } catch (e) { console.error('Erreur notif modération :', e.message); }
         }
 
-        // Supprimer la photo après validation
         if (ligne.photo_path && fs.existsSync(ligne.photo_path)) {
           try { fs.unlinkSync(ligne.photo_path); } catch (e) {}
         }
@@ -170,45 +252,6 @@ setInterval(async () => {
       } catch (err) { console.log(`Erreur rôle ${ligne.discord_id} : ${err.message}`); }
     }
   } catch (err) { console.error('Erreur polling rôles :', err.message); }
-
-  // 2) Envoyer en modération les photos à examiner
-  try {
-    const { rows: aModerer } = await pool.query('SELECT * FROM verifications WHERE a_moderer = 1');
-    for (const ligne of aModerer) {
-      try {
-        if (!ligne.photo_path || !fs.existsSync(ligne.photo_path)) {
-          console.log(`⚠️ Photo introuvable pour ${ligne.code}`);
-          await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
-          continue;
-        }
-
-        const membre = await client.users.fetch(ligne.discord_id).catch(() => null);
-        const fichier = new AttachmentBuilder(ligne.photo_path, { name: 'carnet.jpg' });
-
-        const embed = new EmbedBuilder()
-          .setTitle('🔍 Vérification à examiner')
-          .setColor(0xFEE75C)
-          .addFields(
-            { name: 'Utilisateur', value: membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``, inline: false },
-            { name: 'ID Discord', value: `\`${ligne.discord_id}\``, inline: true },
-            { name: 'Code', value: `\`${ligne.code}\``, inline: true }
-          )
-          .setImage('attachment://carnet.jpg')
-          .setFooter({ text: 'Vérifie que le carnet correspond à un des 3 lycées' })
-          .setTimestamp();
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`mod_approuver:${ligne.code}`).setLabel('Approuver').setStyle(ButtonStyle.Success).setEmoji('✅'),
-          new ButtonBuilder().setCustomId(`mod_refuser:${ligne.code}`).setLabel('Refuser').setStyle(ButtonStyle.Danger).setEmoji('❌')
-        );
-
-        const salon = await client.channels.fetch(SALON_MODERATION_ID);
-        await salon.send({ embeds: [embed], components: [row], files: [fichier] });
-
-        await pool.query('UPDATE verifications SET a_moderer = 2 WHERE code = $1', [ligne.code]);
-      } catch (err) { console.log(`Erreur modération ${ligne.code} : ${err.message}`); }
-    }
-  } catch (err) { console.error('Erreur polling modération :', err.message); }
 }, 10000);
 
 client.login(TOKEN);
