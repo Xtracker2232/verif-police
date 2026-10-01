@@ -181,7 +181,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (action === 'mod_approuver') {
-        await pool.query('UPDATE verifications SET valide = 1 WHERE code = $1', [code]);
+        await pool.query(
+          'UPDATE verifications SET valide = 1, lycee = $1 WHERE code = $2',
+          ['Validé manuellement', code]
+        );
         await interaction.reply({
           content: `✅ Code \`${code}\` approuvé. Le rôle sera donné dans quelques secondes.`,
           ephemeral: true,
@@ -201,7 +204,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ========== POLLING ==========
 setInterval(async () => {
-  // 1) Donner le rôle aux validés
+  // 1) Donner le rôle aux validés + notifier dans #moderation
   try {
     const { rows: valides } = await pool.query(
       'SELECT * FROM verifications WHERE valide = 1'
@@ -221,11 +224,32 @@ setInterval(async () => {
           await membre.roles.add(ROLE_VERIFIE_ID);
           console.log(`✅ Rôle donné à ${membre.user.tag}`);
 
+          // MP à l'utilisateur
           try {
             await membre.send(
               '🎉 Tu es maintenant vérifié ! Tu peux voir tous les salons du serveur.'
             );
           } catch (e) {}
+
+          // Notification dans #moderation
+          try {
+            const salonModo = await client.channels.fetch(SALON_MODERATION_ID);
+            const embedModo = new EmbedBuilder()
+              .setTitle('✅ Nouvelle vérification validée')
+              .setColor(0x57F287)
+              .addFields(
+                { name: 'Utilisateur', value: `<@${membre.id}> (\`${membre.user.tag}\`)`, inline: false },
+                { name: 'ID Discord', value: `\`${membre.id}\``, inline: true },
+                { name: 'Lycée reconnu', value: ligne.lycee || 'Non précisé', inline: true },
+                { name: 'Code', value: `\`${ligne.code}\``, inline: true }
+              )
+              .setThumbnail(membre.user.displayAvatarURL({ dynamic: true }))
+              .setTimestamp();
+
+            await salonModo.send({ embeds: [embedModo] });
+          } catch (e) {
+            console.error('Erreur envoi notification modération :', e.message);
+          }
         }
 
         await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
@@ -237,7 +261,7 @@ setInterval(async () => {
     console.error('Erreur polling rôles :', err.message);
   }
 
-  // 2) Envoyer en modération les photos non reconnues
+  // 2) Envoyer en modération les photos non reconnues par Mindee
   try {
     const { rows: aModerer } = await pool.query(
       'SELECT * FROM verifications WHERE a_moderer = 1'
@@ -252,7 +276,7 @@ setInterval(async () => {
           .setDescription(
             `**Utilisateur :** <@${ligne.discord_id}> (\`${ligne.discord_id}\`)\n` +
             `**Code :** \`${ligne.code}\`\n\n` +
-            `L'OCR n'a pas trouvé automatiquement le nom d'un lycée sur la photo. ` +
+            `Mindee n'a pas trouvé automatiquement le nom d'un lycée sur la photo. ` +
             `Vérifie manuellement si le carnet est valide.`
           )
           .setColor(0xFEE75C)
