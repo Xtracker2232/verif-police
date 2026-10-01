@@ -9,9 +9,11 @@ const {
   SlashCommandBuilder,
   REST,
   Routes,
+  AttachmentBuilder,
 } = require('discord.js');
 
 const { Pool } = require('pg');
+const fs = require('fs');
 
 // ========== CONFIG ==========
 const TOKEN = process.env.TOKEN;
@@ -166,7 +168,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // --- Boutons modération ---
+  // --- Boutons modération (Approuver / Refuser) ---
   if (interaction.isButton() && interaction.customId.startsWith('mod_')) {
     const [action, code] = interaction.customId.split(':');
 
@@ -182,7 +184,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (action === 'mod_approuver') {
         await pool.query(
-          'UPDATE verifications SET valide = 1, lycee = $1 WHERE code = $2',
+          'UPDATE verifications SET valide = 1, lycee = $1, a_moderer = 0 WHERE code = $2',
           ['Validé manuellement', code]
         );
         await interaction.reply({
@@ -204,7 +206,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ========== POLLING ==========
 setInterval(async () => {
-  // 1) Donner le rôle aux validés + notifier dans #moderation
+  // 1) Donner le rôle + notifier dans #moderation
   try {
     const { rows: valides } = await pool.query(
       'SELECT * FROM verifications WHERE valide = 1'
@@ -224,7 +226,6 @@ setInterval(async () => {
           await membre.roles.add(ROLE_VERIFIE_ID);
           console.log(`✅ Rôle donné à ${membre.user.tag}`);
 
-          // MP à l'utilisateur
           try {
             await membre.send(
               '🎉 Tu es maintenant vérifié ! Tu peux voir tous les salons du serveur.'
@@ -240,7 +241,7 @@ setInterval(async () => {
               .addFields(
                 { name: 'Utilisateur', value: `<@${membre.id}> (\`${membre.user.tag}\`)`, inline: false },
                 { name: 'ID Discord', value: `\`${membre.id}\``, inline: true },
-                { name: 'Lycée reconnu', value: ligne.lycee || 'Non précisé', inline: true },
+                { name: 'Lycée', value: ligne.lycee || 'Non précisé', inline: true },
                 { name: 'Code', value: `\`${ligne.code}\``, inline: true }
               )
               .setThumbnail(membre.user.displayAvatarURL({ dynamic: true }))
@@ -261,7 +262,7 @@ setInterval(async () => {
     console.error('Erreur polling rôles :', err.message);
   }
 
-  // 2) Envoyer en modération les photos non reconnues par Mindee
+  // 2) Envoyer en modération les photos non reconnues
   try {
     const { rows: aModerer } = await pool.query(
       'SELECT * FROM verifications WHERE a_moderer = 1'
@@ -269,18 +270,26 @@ setInterval(async () => {
 
     for (const ligne of aModerer) {
       try {
-        const photoUrl = `${SITE_URL}/photo/${ligne.code}`;
+        if (!ligne.photo_path || !fs.existsSync(ligne.photo_path)) {
+          console.log(`⚠️ Photo introuvable pour ${ligne.code}`);
+          await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
+          continue;
+        }
+
+        const membre = await client.users.fetch(ligne.discord_id).catch(() => null);
+        const fichier = new AttachmentBuilder(ligne.photo_path, { name: 'carnet.jpg' });
 
         const embed = new EmbedBuilder()
           .setTitle('🔍 Vérification à examiner')
           .setDescription(
-            `**Utilisateur :** <@${ligne.discord_id}> (\`${ligne.discord_id}\`)\n` +
-            `**Code :** \`${ligne.code}\`\n\n` +
-            `Mindee n'a pas trouvé automatiquement le nom d'un lycée sur la photo. ` +
-            `Vérifie manuellement si le carnet est valide.`
+            `**Utilisateur :** ${membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``}\n` +
+            `**Code :** \`${ligne.code}\`\n` +
+            `**Statut :** ${ligne.lycee || 'En attente'}\n\n` +
+            `Mindee n'a pas pu valider automatiquement ce carnet. ` +
+            `Vérifie manuellement la photo ci-dessous.`
           )
           .setColor(0xFEE75C)
-          .setImage(photoUrl)
+          .setImage('attachment://carnet.jpg')
           .setTimestamp();
 
         const row = new ActionRowBuilder().addComponents(
@@ -295,7 +304,7 @@ setInterval(async () => {
         );
 
         const salon = await client.channels.fetch(SALON_MODERATION_ID);
-        await salon.send({ embeds: [embed], components: [row] });
+        await salon.send({ embeds: [embed], components: [row], files: [fichier] });
 
         await pool.query('UPDATE verifications SET a_moderer = 2 WHERE code = $1', [ligne.code]);
       } catch (err) {
