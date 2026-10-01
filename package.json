@@ -1,0 +1,21 @@
+{
+  "name": "verif-police",
+  "version": "1.0.0",
+  "description": "Vérification Discord pour les lycées Léon Chiris, Amiral de Grasse et Decroisset",
+  "main": "start.js",
+  "scripts": {
+    "start": "node --no-warnings start.js",
+    "bot": "node --no-warnings bot.js",
+    "site": "node --no-warnings server.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "express": "^4.21.1",
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.33.5",
+    "tesseract.js": "^5.1.1"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
