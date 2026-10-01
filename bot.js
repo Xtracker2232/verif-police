@@ -3,7 +3,7 @@ const {
   EmbedBuilder, SlashCommandBuilder, REST, Routes, AttachmentBuilder
 } = require('discord.js');
 const { Pool } = require('pg');
-const fs = require('fs');
+const fetch = require('node-fetch');
 
 // ========== CONFIG ==========
 const TOKEN = process.env.TOKEN;
@@ -52,6 +52,53 @@ client.once(Events.ClientReady, async () => {
   } catch (err) { console.error('❌ Erreur commande :', err); }
 });
 
+// ========== ENVOYER UNE VÉRIFICATION DANS #moderation ==========
+async function envoyerVerification(ligne) {
+  const membre = await client.users.fetch(ligne.discord_id).catch(() => null);
+
+  // Télécharge la photo depuis le site (HTTP), puis envoie en pièce jointe
+  const photoUrl = `${SITE_URL}/photo/${ligne.code}`;
+  let fichier = null;
+
+  try {
+    const response = await fetch(photoUrl);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} en récupérant la photo`);
+    }
+    const buffer = await response.buffer();
+    fichier = new AttachmentBuilder(buffer, { name: `carnet-${ligne.code}.jpg` });
+  } catch (err) {
+    console.error(`❌ Impossible de récupérer la photo pour ${ligne.code} :`, err.message);
+    return false;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('🔍 Vérification à examiner')
+    .setColor(0xFEE75C)
+    .addFields(
+      { name: 'Utilisateur', value: membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``, inline: false },
+      { name: 'ID Discord', value: `\`${ligne.discord_id}\``, inline: true },
+      { name: 'Code', value: `\`${ligne.code}\``, inline: true }
+    )
+    .setImage(`attachment://carnet-${ligne.code}.jpg`)
+    .setFooter({ text: 'Vérifie que le carnet correspond à un des 3 lycées' })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`mod_approuver:${ligne.code}`).setLabel('Approuver').setStyle(ButtonStyle.Success).setEmoji('✅'),
+    new ButtonBuilder().setCustomId(`mod_refuser:${ligne.code}`).setLabel('Refuser').setStyle(ButtonStyle.Danger).setEmoji('❌')
+  );
+
+  try {
+    const salon = await client.channels.fetch(SALON_MODERATION_ID);
+    await salon.send({ embeds: [embed], components: [row], files: [fichier] });
+    return true;
+  } catch (err) {
+    console.error(`❌ Erreur envoi Discord pour ${ligne.code} :`, err.message);
+    return false;
+  }
+}
+
 // ========== INTERACTIONS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
   // --- /panel ---
@@ -80,13 +127,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // --- /reception ---
+  // --- /reception : envoie toutes les photos en attente ---
   if (interaction.isChatInputCommand() && interaction.commandName === 'reception') {
     await interaction.deferReply({ ephemeral: true });
 
     try {
       const { rows } = await pool.query(
-        "SELECT * FROM verifications WHERE a_moderer = 1 ORDER BY created_at ASC"
+        'SELECT * FROM verifications WHERE a_moderer = 1 ORDER BY created_at ASC'
       );
 
       if (rows.length === 0) {
@@ -99,41 +146,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       let erreurs = 0;
 
       for (const ligne of rows) {
-        try {
-          if (!ligne.photo_path || !fs.existsSync(ligne.photo_path)) {
-            console.log(`⚠️ Photo introuvable pour ${ligne.code} : ${ligne.photo_path}`);
-            erreurs++;
-            continue;
-          }
-
-          const membre = await client.users.fetch(ligne.discord_id).catch(() => null);
-          const fichier = new AttachmentBuilder(ligne.photo_path, { name: 'carnet.jpg' });
-
-          const embed = new EmbedBuilder()
-            .setTitle('🔍 Vérification à examiner')
-            .setColor(0xFEE75C)
-            .addFields(
-              { name: 'Utilisateur', value: membre ? `<@${membre.id}> (\`${membre.tag}\`)` : `\`${ligne.discord_id}\``, inline: false },
-              { name: 'ID Discord', value: `\`${ligne.discord_id}\``, inline: true },
-              { name: 'Code', value: `\`${ligne.code}\``, inline: true }
-            )
-            .setImage('attachment://carnet.jpg')
-            .setFooter({ text: 'Vérifie que le carnet correspond à un des 3 lycées' })
-            .setTimestamp();
-
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`mod_approuver:${ligne.code}`).setLabel('Approuver').setStyle(ButtonStyle.Success).setEmoji('✅'),
-            new ButtonBuilder().setCustomId(`mod_refuser:${ligne.code}`).setLabel('Refuser').setStyle(ButtonStyle.Danger).setEmoji('❌')
-          );
-
-          const salon = await client.channels.fetch(SALON_MODERATION_ID);
-          await salon.send({ embeds: [embed], components: [row], files: [fichier] });
-
+        const ok = await envoyerVerification(ligne);
+        if (ok) {
           await pool.query('UPDATE verifications SET a_moderer = 2 WHERE code = $1', [ligne.code]);
           envoyees++;
           console.log(`📤 Envoyée : ${ligne.code}`);
-        } catch (err) {
-          console.error(`❌ Erreur envoi ${ligne.code} :`, err.message);
+        } else {
           erreurs++;
         }
       }
@@ -192,11 +210,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await pool.query('UPDATE verifications SET valide = 1, a_moderer = 0 WHERE code = $1', [code]);
         await interaction.reply({ content: `✅ Code \`${code}\` approuvé. Le rôle sera donné dans quelques secondes.`, ephemeral: true });
       } else {
-        if (rows[0].photo_path && fs.existsSync(rows[0].photo_path)) {
-          try { fs.unlinkSync(rows[0].photo_path); } catch (e) {}
-        }
+        // Prévient le site de supprimer la photo
+        try {
+          await fetch(`${SITE_URL}/api/supprimer-photo/${code}`, { method: 'DELETE' });
+        } catch (e) { console.error('Erreur suppression photo:', e.message); }
+
         await pool.query('DELETE FROM verifications WHERE code = $1', [code]);
-        await interaction.reply({ content: `❌ Code \`${code}\` refusé et photo supprimée.`, ephemeral: true });
+        await interaction.reply({ content: `❌ Code \`${code}\` refusé.`, ephemeral: true });
       }
       await interaction.message.edit({ components: [] }).catch(() => {});
     } catch (err) { console.error('Erreur modération :', err); }
@@ -204,8 +224,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ========== POLLING (rôles uniquement) ==========
+// ========== POLLING : envoi auto + attribution des rôles ==========
 setInterval(async () => {
+  // 1) Envoi automatique des nouvelles photos en modération
+  try {
+    const { rows: nouvelles } = await pool.query(
+      'SELECT * FROM verifications WHERE a_moderer = 1 ORDER BY created_at ASC'
+    );
+
+    for (const ligne of nouvelles) {
+      const ok = await envoyerVerification(ligne);
+      if (ok) {
+        await pool.query('UPDATE verifications SET a_moderer = 2 WHERE code = $1', [ligne.code]);
+        console.log(`📤 Envoyée automatiquement : ${ligne.code}`);
+      }
+    }
+  } catch (err) {
+    console.error('Erreur polling envoi :', err.message);
+  }
+
+  // 2) Attribution des rôles
   try {
     const { rows: valides } = await pool.query('SELECT * FROM verifications WHERE valide = 1');
     for (const ligne of valides) {
@@ -213,9 +251,6 @@ setInterval(async () => {
         const guild = await client.guilds.fetch(GUILD_ID);
         const membre = await guild.members.fetch(ligne.discord_id).catch(() => null);
         if (!membre) {
-          if (ligne.photo_path && fs.existsSync(ligne.photo_path)) {
-            try { fs.unlinkSync(ligne.photo_path); } catch (e) {}
-          }
           await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
           continue;
         }
@@ -242,10 +277,6 @@ setInterval(async () => {
               .setTimestamp();
             await salonModo.send({ embeds: [embedModo] });
           } catch (e) { console.error('Erreur notif modération :', e.message); }
-        }
-
-        if (ligne.photo_path && fs.existsSync(ligne.photo_path)) {
-          try { fs.unlinkSync(ligne.photo_path); } catch (e) {}
         }
 
         await pool.query('DELETE FROM verifications WHERE code = $1', [ligne.code]);
