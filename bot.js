@@ -5,7 +5,6 @@ const {
 const { Pool } = require('pg');
 const fs = require('fs');
 
-// ========== CONFIG ==========
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
@@ -19,16 +18,12 @@ for (const [nom, val] of Object.entries(REQUIS)) {
 }
 if (!process.env.DATABASE_URL) { console.error('❌ DATABASE_URL manquante.'); process.exit(1); }
 
-// ========== POSTGRES ==========
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// ========== UTILS ==========
 function genererCode() { return Math.random().toString(36).substring(2, 8).toUpperCase(); }
 
-// ========== CLIENT ==========
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages] });
 
-// ========== COMMANDE /panel ==========
 const commands = [new SlashCommandBuilder().setName('panel').setDescription('Déploie le panel de vérification').setDefaultMemberPermissions(0).toJSON()];
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
@@ -38,9 +33,7 @@ client.once(Events.ClientReady, async () => {
   catch (err) { console.error('❌ Erreur commande :', err); }
 });
 
-// ========== INTERACTIONS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
-  // --- /panel ---
   if (interaction.isChatInputCommand() && interaction.commandName === 'panel') {
     const embed = new EmbedBuilder().setTitle('🔒 Vérification du serveur')
       .setDescription('Pour accéder aux salons, vérifie que tu fais partie d\'un des lycées :\n• **Léon Chiris**\n• **Amiral de Grasse**\n• **Decroisset**\n\n' +
@@ -52,7 +45,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // --- Clic Vérifier ---
   if (interaction.isButton() && interaction.customId === 'verifier') {
     const userId = interaction.user.id; let code;
     try {
@@ -70,7 +62,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // --- Boutons modération ---
   if (interaction.isButton() && interaction.customId.startsWith('mod_')) {
     const [action, code] = interaction.customId.split(':');
     try {
@@ -90,9 +81,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ========== POLLING ==========
 setInterval(async () => {
-  // 1) Donner le rôle + notifier
   try {
     const { rows: valides } = await pool.query('SELECT * FROM verifications WHERE valide = 1');
     for (const ligne of valides) {
@@ -123,7 +112,6 @@ setInterval(async () => {
     }
   } catch (err) { console.error('Erreur polling rôles :', err.message); }
 
-  // 2) Envoyer en modération
   try {
     const { rows: aModerer } = await pool.query('SELECT * FROM verifications WHERE a_moderer = 1');
     for (const ligne of aModerer) {
