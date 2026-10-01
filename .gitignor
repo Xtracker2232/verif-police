@@ -1,6 +1,4 @@
 node_modules/
-uploads/
-*.db
-*.db-journal
 .env
 .DS_Store
+npm-debug.log
